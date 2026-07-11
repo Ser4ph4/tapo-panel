@@ -23,7 +23,7 @@ app.secret_key = os.environ.get("FLASK_SECRET_KEY", "tapo-chave-secreta-padrao")
 # Dados do administrador puxados das variáveis do Docker
 ADMIN_USER = os.environ.get("PANEL_USER", "admin")
 ADMIN_PASS = os.environ.get("PANEL_PASS", "senha123")
-OTP_SECRET = os.environ.get("PANEL_2FA_SECRET", "JBSWY3DPEHPK3PXP")
+ADMIN_2FA_SECRET = os.environ.get("PANEL_2FA_SECRET", "JBSWY3DPEHPK3PXP")
 
 def query(sql, params=()):
     con = sqlite3.connect(DB_PATH)
@@ -50,7 +50,6 @@ def login():
         password = request.form.get("password")
         
         if username == ADMIN_USER and password == ADMIN_PASS:
-            # Senha correta. Libera o acesso para a tela de 2FA.
             session['pre_auth'] = True
             return redirect(url_for('verify_2fa'))
         else:
@@ -60,17 +59,14 @@ def login():
 
 @app.route("/verify-2fa", methods=["GET", "POST"])
 def verify_2fa():
-    # Impede acesso direto à tela de 2FA se não tiver passado pelo login
     if not session.get('pre_auth'):
         return redirect(url_for('login'))
         
     if request.method == "POST":
         token = request.form.get("token")
         
-        # Verifica se o código de 6 dígitos bate com o segredo
-        totp = pyotp.TOTP(OTP_SECRET)
+        totp = pyotp.TOTP(ADMIN_2FA_SECRET)
         if totp.verify(token):
-            # Tudo certo! Efetiva o login.
             session.pop('pre_auth', None)
             session['user_logged_in'] = True
             return redirect(url_for('index'))
@@ -85,14 +81,13 @@ def logout():
     return redirect(url_for('login'))
 
 
-# --- ROTAS DO PAINEL (AGORA PROTEGIDAS E COM TAMANHO DO BD) ---
+# --- ROTAS DO PAINEL ---
 @app.route("/")
 @login_required
 def index():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         devices = [d["name"] for d in json.load(f)["devices"]]
         
-    # Lógica para ler o tamanho real do banco de dados (tapo.db) em Megabytes
     try:
         db_size_bytes = os.path.getsize(DB_PATH)
         db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
@@ -100,6 +95,19 @@ def index():
         db_size_mb = 0.0
 
     return render_template("index.html", devices=devices, db_size_mb=db_size_mb)
+
+
+# NOVA ROTA: Força a coleta manual ao clicar no botão "ping"
+@app.route("/api/ping", methods=["POST"])
+@login_required
+def api_ping():
+    try:
+        log.info("Coleta manual solicitada via botão Ping.")
+        run_poll_cycle()  # Executa a leitura dos plugs e faz o ping para o Healthchecks.io
+        return jsonify({"status": "success", "message": "Ping executado com sucesso!"})
+    except Exception as e:
+        log.error(f"Erro na coleta manual: {str(e)}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/latest")
@@ -198,13 +206,11 @@ def api_table():
 
 @app.route("/api/health")
 def api_health():
-    # Rota pública para monitoramento local
     return jsonify({"status": "ok", "plugs": [p.name for p in load_plugs()]})
 
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
-    # A correção mantida
     scheduler.add_job(run_poll_cycle, "interval", seconds=POLL_INTERVAL_SECONDS)
     scheduler.start()
     return scheduler

@@ -229,3 +229,42 @@ setInterval(refreshLatest, 15000);
 setInterval(refreshSummary, 15000);
 setInterval(refreshDevicesChart, 30000);
 setInterval(refreshTable, 20000);
+
+// Lógica para ativar o botão de Ping Manual
+document.getElementById('ping-btn').addEventListener('click', function() {
+    const btn = this;
+    const originalHTML = btn.innerHTML;
+    
+    // Desativa o botão temporariamente e muda o texto para indicar progresso
+    btn.disabled = true;
+    btn.innerHTML = `
+        <svg class="spin" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" style="animation: spin 1s linear infinite;"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
+        coletando...
+    `;
+
+    // Envia a requisição para o backend forçar o ciclo
+    fetch('/api/ping', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.status === 'success') {
+            // Se deu certo, podemos forçar a atualização imediata dos blocos da tela
+            if (typeof updateDashboard === 'function') { updateDashboard(); }
+            if (typeof updateTable === 'function') { updateTable(); }
+        } else {
+            alert('Erro ao executar ping manual: ' + data.message);
+        }
+    })
+    .catch(error => {
+        console.error('Erro:', error);
+    })
+    .finally(() => {
+        // Devolve o botão ao estado original
+        btn.disabled = false;
+        btn.innerHTML = originalHTML;
+    });
+});
