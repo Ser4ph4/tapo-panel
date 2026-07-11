@@ -72,3 +72,4 @@ Acesse `http://localhost:5000`.
   "M" ou sem medição), `energy_info` vem `None` e o card mostra "—" —
   o painel não quebra, só não tem os números de consumo.
 # tapo-painel
+<img width="1865" height="1004" alt="Screenshot 2026-07-11 at 13-17-06 Tapo · Painel de Energia" src="https://github.com/user-attachments/assets/5e7934e6-6a42-41e6-b33d-6770a5e113f0" />
