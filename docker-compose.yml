@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  tapo-panel:
+    build: .
+    # ou, depois de publicar a imagem:
+    # image: ghcr.io/seraph4/tapo-panel:latest
+    container_name: tapo-panel
+    restart: unless-stopped
+    environment:
+      TAPO_EMAIL: ${TAPO_EMAIL}
+      TAPO_PASSWORD: ${TAPO_PASSWORD}
+      POLL_INTERVAL_SECONDS: "60"
+      DB_PATH: /data/tapo.db
+      CONFIG_PATH: /app/config.json
+      # opcional: heartbeat pro Healthchecks.io a cada ciclo de coleta
+      HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - tapo_data:/data
+    ports:
+      # amarre no IP Tailscale do host, seguindo o mesmo padrão dos outros serviços
+      - "0.0.0.0:5500:5000"
+
+volumes:
+  tapo_data:
