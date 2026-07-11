@@ -71,3 +71,4 @@ Acesse `http://localhost:5000`.
 - Se algum plug não tiver monitoramento de energia (P100 puro, sem o
   "M" ou sem medição), `energy_info` vem `None` e o card mostra "—" —
   o painel não quebra, só não tem os números de consumo.
+# tapo-painel
