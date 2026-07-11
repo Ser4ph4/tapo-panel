@@ -3,9 +3,11 @@ import logging
 import os
 import sqlite3
 import time
+from functools import wraps
 
+import pyotp
 from apscheduler.schedulers.background import BackgroundScheduler
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request, session, redirect, url_for, flash
 
 from collector import CONFIG_PATH, DB_PATH, init_db, load_plugs, run_poll_cycle
 
@@ -15,7 +17,13 @@ log = logging.getLogger("app")
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
 
 app = Flask(__name__)
+# Chave secreta obrigatória para usar sessões no Flask
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "tapo-chave-secreta-padrao")
 
+# Dados do administrador puxados das variáveis do Docker
+ADMIN_USER = os.environ.get("PANEL_USER", "admin")
+ADMIN_PASS = os.environ.get("PANEL_PASS", "senha123")
+OTP_SECRET = os.environ.get("PANEL_2FA_SECRET", "JBSWY3DPEHPK3PXP")
 
 def query(sql, params=()):
     con = sqlite3.connect(DB_PATH)
@@ -24,17 +32,79 @@ def query(sql, params=()):
     con.close()
     return [dict(r) for r in rows]
 
+# --- DECORADOR DE SEGURANÇA ---
+def login_required(f):
+    """Bloqueia o acesso a qualquer rota se não estiver logado."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('user_logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
+# --- ROTAS DE AUTENTICAÇÃO ---
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "POST":
+        username = request.form.get("username")
+        password = request.form.get("password")
+        
+        if username == ADMIN_USER and password == ADMIN_PASS:
+            # Senha correta. Libera o acesso para a tela de 2FA.
+            session['pre_auth'] = True
+            return redirect(url_for('verify_2fa'))
+        else:
+            flash("Usuário ou senha inválidos.")
+            
+    return render_template("login.html")
+
+@app.route("/verify-2fa", methods=["GET", "POST"])
+def verify_2fa():
+    # Impede acesso direto à tela de 2FA se não tiver passado pelo login
+    if not session.get('pre_auth'):
+        return redirect(url_for('login'))
+        
+    if request.method == "POST":
+        token = request.form.get("token")
+        
+        # Verifica se o código de 6 dígitos bate com o segredo
+        totp = pyotp.TOTP(OTP_SECRET)
+        if totp.verify(token):
+            # Tudo certo! Efetiva o login.
+            session.pop('pre_auth', None)
+            session['user_logged_in'] = True
+            return redirect(url_for('index'))
+        else:
+            flash("Código 2FA inválido.")
+            
+    return render_template("verify_2fa.html")
+
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
+
+
+# --- ROTAS DO PAINEL (AGORA PROTEGIDAS E COM TAMANHO DO BD) ---
 @app.route("/")
+@login_required
 def index():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         devices = [d["name"] for d in json.load(f)["devices"]]
-    return render_template("index.html", devices=devices)
+        
+    # Lógica para ler o tamanho real do banco de dados (tapo.db) em Megabytes
+    try:
+        db_size_bytes = os.path.getsize(DB_PATH)
+        db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
+    except OSError:
+        db_size_mb = 0.0
+
+    return render_template("index.html", devices=devices, db_size_mb=db_size_mb)
 
 
 @app.route("/api/latest")
+@login_required
 def api_latest():
-    """Última leitura de cada plug."""
     rows = query(
         """
         SELECT r.* FROM readings r
@@ -49,8 +119,8 @@ def api_latest():
 
 
 @app.route("/api/history/<device_name>")
+@login_required
 def api_history(device_name):
-    """Histórico de potência das últimas 24h (padrão) pra montar o gráfico."""
     since = int(time.time()) - 24 * 3600
     rows = query(
         """
@@ -65,9 +135,8 @@ def api_history(device_name):
 
 
 @app.route("/api/summary")
+@login_required
 def api_summary():
-    """Totais agregados de todos os plugs: potência somada agora, energia
-    somada hoje/mês, e histórico da soma de potência das últimas 24h."""
     latest = query(
         """
         SELECT r.* FROM readings r
@@ -92,8 +161,6 @@ def api_summary():
         """,
         (since,),
     )
-    # soma por timestamp (arredondado ao ciclo de coleta) pra montar
-    # uma série "potência total" ao longo do dia
     by_ts = {}
     for r in rows:
         bucket = r["ts"] - (r["ts"] % POLL_INTERVAL_SECONDS)
@@ -114,9 +181,8 @@ def api_summary():
 
 
 @app.route("/api/table")
+@login_required
 def api_table():
-    """Últimas N leituras de todos os dispositivos, mais recentes primeiro,
-    pra alimentar a tabela de histórico no rodapé do dashboard."""
     limit = int(os.environ.get("TABLE_ROWS", "25"))
     rows = query(
         """
@@ -132,18 +198,20 @@ def api_table():
 
 @app.route("/api/health")
 def api_health():
+    # Rota pública para monitoramento local
     return jsonify({"status": "ok", "plugs": [p.name for p in load_plugs()]})
 
 
 def start_scheduler():
     scheduler = BackgroundScheduler()
-    scheduler.add_job(run_poll_cycle, "interval", seconds=POLL_INTERVAL_SECONDS, next_run_time=None)
+    # A correção mantida
+    scheduler.add_job(run_poll_cycle, "interval", seconds=POLL_INTERVAL_SECONDS)
     scheduler.start()
     return scheduler
 
 
 init_db()
-run_poll_cycle()  # primeira leitura já no boot, pra não esperar o intervalo inteiro
+run_poll_cycle()
 _scheduler = start_scheduler()
 
 if __name__ == "__main__":
