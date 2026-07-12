@@ -1,7 +1,15 @@
 let chartTotal = null;
 let chartDevices = null;
 
-// --- Funções Utilitárias ---
+async function authedFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (res.status === 401) {
+    window.location.href = "/login";
+    throw new Error("sessão expirada");
+  }
+  return res;
+}
+
 function fmt(n, digits = 0) {
   if (n === null || n === undefined) return "—";
   return Number(n).toLocaleString("pt-BR", { maximumFractionDigits: digits });
@@ -30,10 +38,9 @@ function updateClock() {
     .replace(".", "");
 }
 
-// --- Funções de Atualização ---
 async function refreshLatest() {
   try {
-    const res = await fetch("/api/latest");
+    const res = await authedFetch("/api/latest");
     const rows = await res.json();
     const byDevice = Object.fromEntries(rows.map((r) => [r.device_name, r]));
 
@@ -49,6 +56,7 @@ async function refreshLatest() {
       card.querySelector('[data-role="today"]').textContent = fmt(r.today_energy_wh);
       card.querySelector('[data-role="updated"]').textContent = `atualizado ${timeAgo(r.ts)}`;
     });
+
     setGlobalStatus(true);
   } catch (err) {
     console.error(err);
@@ -58,7 +66,7 @@ async function refreshLatest() {
 
 async function refreshSummary() {
   try {
-    const res = await fetch("/api/summary");
+    const res = await authedFetch("/api/summary");
     const s = await res.json();
 
     document.querySelector('[data-role="hero-power"]').textContent = `${fmt(s.total_power_w, 1)} W`;
@@ -76,7 +84,8 @@ async function refreshSummary() {
     const now = new Date();
     const secondsToday = now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds();
     const dayPct = (secondsToday / 86400) * 100;
-    document.querySelector('[data-role="stat-today-sub"]').textContent = `${Math.round(dayPct)}% do dia decorrido`;
+    document.querySelector('[data-role="stat-today-sub"]').textContent =
+      `${Math.round(dayPct)}% do dia decorrido`;
     document.querySelector('[data-role="stat-today-bar"]').style.width = `${dayPct}%`;
 
     document.querySelector('[data-role="stat-month"]').textContent = `${fmt(s.total_month_wh / 1000, 1)} kWh`;
@@ -91,7 +100,6 @@ async function refreshSummary() {
   }
 }
 
-// --- Gráficos ---
 function renderChartTotal(history) {
   const ctx = document.getElementById("chart-total");
   const labels = history.map((r) => hhmm(r.ts));
@@ -104,7 +112,20 @@ function renderChartTotal(history) {
 
     chartTotal = new Chart(ctx, {
       type: "line",
-      data: { labels, datasets: [{ data, borderColor: "#4f8cff", backgroundColor: gradient, borderWidth: 2, pointRadius: 0, tension: 0.35, fill: true }] },
+      data: {
+        labels,
+        datasets: [
+          {
+            data,
+            borderColor: "#4f8cff",
+            backgroundColor: gradient,
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.35,
+            fill: true,
+          },
+        ],
+      },
       options: chartBaseOptions(),
     });
   } else {
@@ -115,12 +136,25 @@ function renderChartTotal(history) {
 }
 
 function chartBaseOptions() {
-  return { responsive: true, maintainAspectRatio: false, animation: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: true, grid: { color: "#151b2b" }, ticks: { color: "#6b7690", font: { size: 10 } } } } };
+  return {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    plugins: { legend: { display: false } },
+    scales: {
+      x: { display: false },
+      y: {
+        display: true,
+        grid: { color: "#151b2b" },
+        ticks: { color: "#6b7690", font: { size: 10 } },
+      },
+    },
+  };
 }
 
 async function refreshDevicesChart() {
   try {
-    const res = await fetch("/api/latest");
+    const res = await authedFetch("/api/latest");
     const rows = await res.json();
     const labels = rows.map((r) => r.device_name);
     const data = rows.map((r) => r.today_energy_wh || 0);
@@ -130,7 +164,17 @@ async function refreshDevicesChart() {
     if (!chartDevices) {
       chartDevices = new Chart(ctx, {
         type: "bar",
-        data: { labels, datasets: [{ data, backgroundColor: labels.map((_, i) => colors[i % colors.length]), borderRadius: 6, maxBarThickness: 42 }] },
+        data: {
+          labels,
+          datasets: [
+            {
+              data,
+              backgroundColor: labels.map((_, i) => colors[i % colors.length]),
+              borderRadius: 6,
+              maxBarThickness: 42,
+            },
+          ],
+        },
         options: chartBaseOptions(),
       });
     } else {
@@ -139,16 +183,31 @@ async function refreshDevicesChart() {
       chartDevices.data.datasets[0].backgroundColor = labels.map((_, i) => colors[i % colors.length]);
       chartDevices.update();
     }
-  } catch (err) { console.error("erro no chart de dispositivos", err); }
+  } catch (err) {
+    console.error("erro no chart de dispositivos", err);
+  }
 }
 
 async function refreshTable() {
   try {
-    const res = await fetch("/api/table");
+    const res = await authedFetch("/api/table");
     const rows = await res.json();
     const tbody = document.getElementById("log-body");
-    tbody.innerHTML = rows.map((r) => `<tr><td>${hhmm(r.ts)}</td><td>${r.device_name}</td><td><span class="chip ${r.is_on ? "chip-on" : "chip-off"}">${r.is_on ? "ligado" : "desligado"}</span></td><td class="num">${fmt(r.current_power_w, 1)} W</td><td class="num">${fmt(r.today_energy_wh)} Wh</td></tr>`).join("");
-  } catch (err) { console.error("erro na tabela", err); }
+    tbody.innerHTML = rows
+      .map(
+        (r) => `
+        <tr>
+          <td>${hhmm(r.ts)}</td>
+          <td>${r.device_name}</td>
+          <td><span class="chip ${r.is_on ? "chip-on" : "chip-off"}">${r.is_on ? "ligado" : "desligado"}</span></td>
+          <td class="num">${fmt(r.current_power_w, 1)} W</td>
+          <td class="num">${fmt(r.today_energy_wh)} Wh</td>
+        </tr>`
+      )
+      .join("");
+  } catch (err) {
+    console.error("erro na tabela", err);
+  }
 }
 
 function setGlobalStatus(ok) {
@@ -165,25 +224,28 @@ function tick() {
   refreshTable();
 }
 
-// --- Lógica do Botão Ping ---
-document.getElementById("ping-btn").addEventListener("click", function() {
-    const btn = this;
-    const originalContent = btn.innerHTML;
-
-    btn.disabled = true;
-    btn.innerHTML = `<span>coletando...</span>`;
-    btn.classList.add("spin");
-
-    fetch('/api/ping', { method: 'POST', headers: { 'Content-Type': 'application/json' } })
-    .then(response => { if (!response.ok) throw new Error('Falha'); return response.json(); })
-    .then(data => { console.log("Ping concluído:", data); tick(); })
-    .catch(error => { console.error('Erro:', error); alert("Erro ao pingar."); })
-    .finally(() => { btn.disabled = false; btn.innerHTML = originalContent; btn.classList.remove("spin"); });
+document.getElementById("ping-btn").addEventListener("click", async (e) => {
+  const btn = e.currentTarget;
+  btn.classList.add("spin");
+  btn.disabled = true;
+  try {
+    const res = await authedFetch("/api/ping", { method: "POST" });
+    const data = await res.json();
+    if (data.status !== "success") {
+      console.warn("ping falhou:", data.message);
+    }
+  } catch (err) {
+    console.error("erro no ping manual", err);
+  } finally {
+    tick();
+    btn.disabled = false;
+    setTimeout(() => btn.classList.remove("spin"), 600);
+  }
 });
 
-// --- Inicialização ---
 updateClock();
 setInterval(updateClock, 1000);
+
 tick();
 setInterval(refreshLatest, 15000);
 setInterval(refreshSummary, 15000);

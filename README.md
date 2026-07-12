@@ -1,10 +1,3 @@
-<!--
- * @Author: Ser4ph4
- * @Date: 2026-07-11 14:41:03
- * @LastEditors: Ser4ph4
- * @LastEditTime: 2026-07-11 14:41:12
--->
-
 # tapo-panel
 
 Painel próprio (sem Grafana, sem Home Assistant) pros plugs Tapo P110.
@@ -78,6 +71,3 @@ Acesse `http://localhost:5000`.
 - Se algum plug não tiver monitoramento de energia (P100 puro, sem o
   "M" ou sem medição), `energy_info` vem `None` e o card mostra "—" —
   o painel não quebra, só não tem os números de consumo.
-
-# tapo-painel
-<img width="1865" height="1004" alt="Screenshot 2026-07-11 at 13-17-06 Tapo · Painel de Energia" src="https://github.com/user-attachments/assets/5e7934e6-6a42-41e6-b33d-6770a5e113f0" />
