@@ -17,13 +17,34 @@ log = logging.getLogger("app")
 POLL_INTERVAL_SECONDS = int(os.environ.get("POLL_INTERVAL_SECONDS", "60"))
 
 app = Flask(__name__)
-# Chave secreta obrigatória para usar sessões no Flask
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "tapo-chave-secreta-padrao")
 
-# Dados do administrador puxados das variáveis do Docker
-ADMIN_USER = os.environ.get("PANEL_USER", "admin")
-ADMIN_PASS = os.environ.get("PANEL_PASS", "senha123")
-ADMIN_2FA_SECRET = os.environ.get("PANEL_2FA_SECRET", "JBSWY3DPEHPK3PXP")
+
+def require_env(name: str) -> str:
+    """Credenciais/segredos não têm fallback: sobe com valor fraco por
+    engano é pior do que o container recusar subir sem a env var certa."""
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(
+            f"Variável de ambiente obrigatória '{name}' não definida. "
+            "Configure-a na stack antes de subir o painel (sem valor padrão por segurança)."
+        )
+    return value
+
+
+app.secret_key = require_env("FLASK_SECRET_KEY")
+
+# Dados do administrador puxados das variáveis do Docker — sem fallback
+ADMIN_USER = require_env("PANEL_USER")
+ADMIN_PASS = require_env("PANEL_PASS")
+ADMIN_2FA_SECRET = require_env("PANEL_2FA_SECRET")
+
+# Cookies de sessão mais seguros atrás de Cloudflare Tunnel/HTTPS
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "true").lower() == "true",
+)
+
 
 def query(sql, params=()):
     con = sqlite3.connect(DB_PATH)
@@ -32,15 +53,21 @@ def query(sql, params=()):
     con.close()
     return [dict(r) for r in rows]
 
+
 # --- DECORADOR DE SEGURANÇA ---
 def login_required(f):
     """Bloqueia o acesso a qualquer rota se não estiver logado."""
+
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get('user_logged_in'):
-            return redirect(url_for('login'))
+        if not session.get("user_logged_in"):
+            if request.path.startswith("/api/"):
+                return jsonify({"error": "not_authenticated"}), 401
+            return redirect(url_for("login"))
         return f(*args, **kwargs)
+
     return decorated_function
+
 
 # --- ROTAS DE AUTENTICAÇÃO ---
 @app.route("/login", methods=["GET", "POST"])
@@ -48,37 +75,39 @@ def login():
     if request.method == "POST":
         username = request.form.get("username")
         password = request.form.get("password")
-        
+
         if username == ADMIN_USER and password == ADMIN_PASS:
-            session['pre_auth'] = True
-            return redirect(url_for('verify_2fa'))
+            session["pre_auth"] = True
+            return redirect(url_for("verify_2fa"))
         else:
             flash("Usuário ou senha inválidos.")
-            
+
     return render_template("login.html")
+
 
 @app.route("/verify-2fa", methods=["GET", "POST"])
 def verify_2fa():
-    if not session.get('pre_auth'):
-        return redirect(url_for('login'))
-        
+    if not session.get("pre_auth"):
+        return redirect(url_for("login"))
+
     if request.method == "POST":
         token = request.form.get("token")
-        
+
         totp = pyotp.TOTP(ADMIN_2FA_SECRET)
         if totp.verify(token):
-            session.pop('pre_auth', None)
-            session['user_logged_in'] = True
-            return redirect(url_for('index'))
+            session.pop("pre_auth", None)
+            session["user_logged_in"] = True
+            return redirect(url_for("index"))
         else:
             flash("Código 2FA inválido.")
-            
+
     return render_template("verify_2fa.html")
+
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for('login'))
+    return redirect(url_for("login"))
 
 
 # --- ROTAS DO PAINEL ---
@@ -87,7 +116,7 @@ def logout():
 def index():
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         devices = [d["name"] for d in json.load(f)["devices"]]
-        
+
     try:
         db_size_bytes = os.path.getsize(DB_PATH)
         db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
@@ -97,15 +126,14 @@ def index():
     return render_template("index.html", devices=devices, db_size_mb=db_size_mb)
 
 
-# NOVA ROTA: Força a coleta manual ao clicar no botão "ping"
 @app.route("/api/ping", methods=["POST"])
 @login_required
 def api_ping():
     try:
         log.info("Coleta manual solicitada via botão Ping.")
-        run_poll_cycle()  # Executa a leitura dos plugs e faz o ping para o Healthchecks.io
+        run_poll_cycle()
         return jsonify({"status": "success", "message": "Ping executado com sucesso!"})
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.error(f"Erro na coleta manual: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 

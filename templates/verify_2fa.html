@@ -1,190 +1,55 @@
 <!DOCTYPE html>
 <html lang="pt-BR">
-
 <head>
-    <meta charset="UTF-8">
-    <title>2FA - Tapo Dashboard</title>
-    <link rel="icon"
-        href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-
-    <style>
-        :root {
-            --bg-dark: #0f172a;
-            --bg-panel: #1e293b;
-            --border-color: #334155;
-            --success: #10b981;
-            --success-hover: #059669;
-            --text-main: #f8fafc;
-            --text-muted: #94a3b8;
-        }
-
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }
-
-        body {
-            font-family: 'Inter', sans-serif;
-            background: radial-gradient(circle at 50% -20%, #1e293b 0%, #0f172a 80%);
-            color: var(--text-main);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            min-height: 100vh;
-        }
-
-        .login-wrapper {
-            width: 100%;
-            max-width: 400px;
-            padding: 20px;
-        }
-
-        .login-box {
-            background: var(--bg-panel);
-            padding: 2.5rem 2rem;
-            border-radius: 12px;
-            border: 1px solid var(--border-color);
-            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
-            text-align: center;
-        }
-
-        .login-header {
-            margin-bottom: 2rem;
-        }
-
-        .login-icon {
-            margin-bottom: 0.5rem;
-            display: inline-block;
-            color: var(--success);
-        }
-
-        .login-header h2 {
-            font-size: 1.5rem;
-            font-weight: 600;
-            letter-spacing: -0.025em;
-        }
-
-        .login-header p {
-            color: var(--text-muted);
-            font-size: 0.875rem;
-            margin-top: 0.5rem;
-        }
-
-        .form-group {
-            margin-bottom: 1.25rem;
-        }
-
-        input {
-            width: 100%;
-            padding: 1rem;
-            border-radius: 6px;
-            border: 1px solid var(--border-color);
-            background: var(--bg-dark);
-            color: var(--success);
-            /* Destaca o código em verde */
-            font-size: 2rem;
-            font-weight: 600;
-            font-family: monospace;
-            /* Fonte monoespaçada para os números */
-            text-align: center;
-            letter-spacing: 0.5em;
-            /* Espaçamento entre os números */
-            transition: all 0.2s ease;
-        }
-
-        /* Ajuste para o padding compensar a letra final devido ao letter-spacing */
-        input {
-            padding-left: calc(1rem + 0.25em);
-        }
-
-        input:focus {
-            outline: none;
-            border-color: var(--success);
-            box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.25);
-        }
-
-        button {
-            background: var(--success);
-            color: white;
-            border: none;
-            padding: 0.75rem 1.5rem;
-            border-radius: 6px;
-            font-size: 1rem;
-            font-weight: 600;
-            font-family: inherit;
-            cursor: pointer;
-            width: 100%;
-            margin-top: 0.5rem;
-            transition: background-color 0.2s ease, transform 0.1s ease;
-        }
-
-        button:hover {
-            background: var(--success-hover);
-        }
-
-        button:active {
-            transform: scale(0.98);
-        }
-
-        .error {
-            background-color: rgba(239, 68, 68, 0.1);
-            color: #ef4444;
-            border: 1px solid rgba(239, 68, 68, 0.2);
-            padding: 0.75rem;
-            border-radius: 6px;
-            margin-bottom: 1.5rem;
-            font-size: 0.875rem;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 8px;
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Verificação 2FA · Tapo Panel</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>⚡</text></svg>">
+  <link rel="stylesheet" href="/static/style.css" />
 </head>
-
-<body>
-    <div class="login-wrapper">
-        <div class="login-box">
-
-            <div class="login-header">
-                <div class="login-icon">
-                    <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="2"
-                        stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                    </svg>
-                </div>
-                <h2>Verificação 2FA</h2>
-                <p>Abra seu aplicativo autenticador e digite o código gerado.</p>
-            </div>
-
-            {% with messages = get_flashed_messages() %}
-            {% if messages %}
-            <div class="error">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round" stroke-linejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="12" y1="8" x2="12" y2="12" />
-                    <line x1="12" y1="16" x2="12.01" y2="16" />
-                </svg>
-                <span>
-                    {% for message in messages %} {{ message }} {% endfor %}
-                </span>
-            </div>
-            {% endif %}
-            {% endwith %}
-
-            <form method="POST">
-                <div class="form-group">
-                    <input type="text" name="token" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code"
-                        placeholder="000000" required autofocus>
-                </div>
-                <button type="submit">Autenticar Sessão</button>
-            </form>
-
-        </div>
+<body class="auth-body">
+  <div class="auth-card">
+    <div class="auth-logo">
+      <div class="logo-badge">T</div>
+      <div>
+        <div class="statusbar-title">TAPO PANEL</div>
+        <div class="statusbar-sub">Energy Monitor</div>
+      </div>
     </div>
-</body>
 
+    <h1 class="auth-title">Verificação em duas etapas</h1>
+    <p class="auth-sub">Digite o código do seu app autenticador</p>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <div class="auth-flash">
+          {% for msg in messages %}<div>{{ msg }}</div>{% endfor %}
+        </div>
+      {% endif %}
+    {% endwith %}
+
+    <form method="POST" class="auth-form">
+      <label class="auth-label" for="token">código de 6 dígitos</label>
+      <input
+        class="auth-input auth-input-otp"
+        type="text"
+        id="token"
+        name="token"
+        inputmode="numeric"
+        pattern="[0-9]*"
+        maxlength="6"
+        autocomplete="one-time-code"
+        required
+        autofocus
+      />
+
+      <button class="auth-submit" type="submit">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+        verificar
+      </button>
+    </form>
+
+    <a class="auth-back" href="/login">← voltar pro login</a>
+  </div>
+</body>
 </html>
