@@ -1,5 +1,6 @@
 let chartTotal = null;
 let chartDevices = null;
+let chartHourly = null;
 
 async function authedFetch(url, options = {}) {
   const res = await fetch(url, options);
@@ -210,6 +211,85 @@ async function refreshTable() {
   }
 }
 
+async function refreshHourlyPattern() {
+  try {
+    const res = await authedFetch("/api/hourly-pattern?days=365");
+    const rows = await res.json();
+    const byHour = Object.fromEntries(rows.map((r) => [r.hour, r.avg_power_w]));
+    const labels = Array.from({ length: 24 }, (_, h) => `${String(h).padStart(2, "0")}h`);
+    const data = Array.from({ length: 24 }, (_, h) => byHour[h] ?? 0);
+
+    const ctx = document.getElementById("chart-hourly");
+    if (!chartHourly) {
+      chartHourly = new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels,
+          datasets: [
+            {
+              data,
+              backgroundColor: "#34d399",
+              borderRadius: 4,
+              maxBarThickness: 22,
+            },
+          ],
+        },
+        options: {
+          ...chartBaseOptions(),
+          scales: {
+            x: { display: true, grid: { display: false }, ticks: { color: "#6b7690", font: { size: 9 } } },
+            y: { display: true, grid: { color: "#151b2b" }, ticks: { color: "#6b7690", font: { size: 10 } } },
+          },
+        },
+      });
+    } else {
+      chartHourly.data.labels = labels;
+      chartHourly.data.datasets[0].data = data;
+      chartHourly.update();
+    }
+  } catch (err) {
+    console.error("erro no padrão por hora", err);
+  }
+}
+
+async function refreshHouseSummary() {
+  try {
+    const res = await authedFetch("/api/house-summary");
+    const s = await res.json();
+    const section = document.getElementById("house-section");
+
+    if (!s.enabled) {
+      section.style.display = "none";
+      return;
+    }
+    section.style.display = "";
+
+    if (!s.has_data) {
+      document.querySelector('[data-role="house-sub"]').textContent = "aguardando primeira leitura…";
+      return;
+    }
+
+    document.querySelector('[data-role="house-power"]').textContent = `${fmt(s.power_w, 1)} W`;
+    const voltCurrent = [];
+    if (s.voltage_v !== null && s.voltage_v !== undefined) voltCurrent.push(`${fmt(s.voltage_v, 1)}V`);
+    if (s.current_a !== null && s.current_a !== undefined) voltCurrent.push(`${fmt(s.current_a, 2)}A`);
+    document.querySelector('[data-role="house-sub"]').textContent = voltCurrent.join(" · ") || "—";
+
+    document.querySelector('[data-role="house-monitored"]').textContent = `${fmt(s.monitored_power_w, 1)} W`;
+    document.querySelector('[data-role="house-unidentified"]').textContent = `${fmt(s.unidentified_power_w, 1)} W`;
+
+    const setPeriod = (role, val) => {
+      const el = document.querySelector(`[data-role="${role}"]`);
+      el.childNodes[0].textContent = val === null || val === undefined ? "— " : `${fmt(val, 1)} `;
+    };
+    setPeriod("house-today", s.today_kwh);
+    setPeriod("house-month", s.month_kwh);
+    setPeriod("house-year", s.year_kwh);
+  } catch (err) {
+    console.error("erro no house-summary", err);
+  }
+}
+
 function setGlobalStatus(ok) {
   const dot = document.getElementById("global-dot");
   const text = document.getElementById("global-status-text");
@@ -222,6 +302,7 @@ function tick() {
   refreshSummary();
   refreshDevicesChart();
   refreshTable();
+  refreshHouseSummary();
 }
 
 document.getElementById("ping-btn").addEventListener("click", async (e) => {
@@ -247,7 +328,10 @@ updateClock();
 setInterval(updateClock, 1000);
 
 tick();
+refreshHourlyPattern();
 setInterval(refreshLatest, 15000);
 setInterval(refreshSummary, 15000);
 setInterval(refreshDevicesChart, 30000);
 setInterval(refreshTable, 20000);
+setInterval(refreshHourlyPattern, 3600000);
+setInterval(refreshHouseSummary, 15000);

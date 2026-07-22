@@ -1,20 +1,50 @@
 services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: tapo-influxdb-note
+    restart: unless-stopped
+    environment:
+      TZ: America/Sao_Paulo
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUX_USER}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUX_PASS}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUX_ORG:-nemik}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUX_BUCKET:-tapo_energy}
+      DOCKER_INFLUXDB_INIT_RETENTION: "0"
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUX_TOKEN}
+    volumes:
+      - /opt/tapo-dashboard/influx_data:/var/lib/influxdb2
+      - /opt/tapo-dashboard/influx_config:/etc/influxdb2
+    ports:
+      - "8096:8086"
+
   tapo-panel:
     image: ghcr.io/ser4ph4/tapo-panel:latest
     container_name: tapo-panel-note
     restart: unless-stopped
+    depends_on:
+      - influxdb
+    command: sh -c "pip install pyotp influxdb-client tinytuya && gunicorn --bind 0.0.0.0:${PORT:-5000} app:app"
     environment:
       TAPO_EMAIL: ${TAPO_EMAIL}
       TAPO_PASSWORD: ${TAPO_PASSWORD}
       POLL_INTERVAL_SECONDS: "120"
-      DB_PATH: /data/tapo.db
       CONFIG_PATH: /app/config.json
       HEALTHCHECK_URL: ${HEALTHCHECK_URL:-}
+      PANEL_USER: ${PANEL_USER}
+      PANEL_PASS: ${PANEL_PASS}
+      PANEL_2FA_SECRET: ${PANEL_2FA_SECRET}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY}
+      INFLUX_URL: http://influxdb:8086
+      INFLUX_TOKEN: ${INFLUX_TOKEN}
+      INFLUX_ORG: ${INFLUX_ORG:-nemik}
+      INFLUX_BUCKET: ${INFLUX_BUCKET:-tapo_energy}
+      TZ: America/Sao_Paulo
     volumes:
       - /opt/tapo-dashboard/config.json:/app/config.json:ro
-      - tapo_data:/data
+      - /opt/tapo-dashboard/app.py:/app/app.py
+      - /opt/tapo-dashboard/collector.py:/app/collector.py
+      - /opt/tapo-dashboard/templates:/app/templates
+      - /opt/tapo-dashboard/static:/app/static
     ports:
       - "0.0.0.0:5500:5000"
-
-volumes:
-  tapo_data:

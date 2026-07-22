@@ -1,15 +1,26 @@
 import json
 import logging
 import os
-import sqlite3
 import time
+from datetime import datetime
 from functools import wraps
 
 import pyotp
 from apscheduler.schedulers.background import BackgroundScheduler
 from flask import Flask, jsonify, render_template, request, session, redirect, url_for, flash
+from influxdb_client import InfluxDBClient
 
-from collector import CONFIG_PATH, DB_PATH, init_db, load_plugs, run_poll_cycle
+from collector import (
+    CONFIG_PATH,
+    INFLUX_BUCKET,
+    INFLUX_ORG,
+    INFLUX_TOKEN,
+    INFLUX_URL,
+    init_db,
+    load_house_meter_config,
+    load_plugs,
+    run_poll_cycle,
+)
 
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 log = logging.getLogger("app")
@@ -20,8 +31,6 @@ app = Flask(__name__)
 
 
 def require_env(name: str) -> str:
-    """Credenciais/segredos não têm fallback: sobe com valor fraco por
-    engano é pior do que o container recusar subir sem a env var certa."""
     value = os.environ.get(name)
     if not value:
         raise RuntimeError(
@@ -32,32 +41,32 @@ def require_env(name: str) -> str:
 
 
 app.secret_key = require_env("FLASK_SECRET_KEY")
-
-# Dados do administrador puxados das variáveis do Docker — sem fallback
 ADMIN_USER = require_env("PANEL_USER")
 ADMIN_PASS = require_env("PANEL_PASS")
 ADMIN_2FA_SECRET = require_env("PANEL_2FA_SECRET")
 
-# Cookies de sessão mais seguros atrás de Cloudflare Tunnel/HTTPS
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("COOKIE_SECURE", "true").lower() == "true",
 )
 
+_influx_client = InfluxDBClient(url=INFLUX_URL, token=INFLUX_TOKEN, org=INFLUX_ORG)
+_query_api = _influx_client.query_api()
 
-def query(sql, params=()):
-    con = sqlite3.connect(DB_PATH)
-    con.row_factory = sqlite3.Row
-    rows = con.execute(sql, params).fetchall()
-    con.close()
-    return [dict(r) for r in rows]
+
+def flux_query(flux: str):
+    """Roda uma query Flux e devolve uma lista de dicts (um por record)."""
+    tables = _query_api.query(flux, org=INFLUX_ORG)
+    rows = []
+    for table in tables:
+        for record in table.records:
+            rows.append(dict(record.values))
+    return rows
 
 
 # --- DECORADOR DE SEGURANÇA ---
 def login_required(f):
-    """Bloqueia o acesso a qualquer rota se não estiver logado."""
-
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if not session.get("user_logged_in"):
@@ -92,7 +101,6 @@ def verify_2fa():
 
     if request.method == "POST":
         token = request.form.get("token")
-
         totp = pyotp.TOTP(ADMIN_2FA_SECRET)
         if totp.verify(token):
             session.pop("pre_auth", None)
@@ -118,12 +126,22 @@ def index():
         devices = [d["name"] for d in json.load(f)["devices"]]
 
     try:
-        db_size_bytes = os.path.getsize(DB_PATH)
-        db_size_mb = round(db_size_bytes / (1024 * 1024), 2)
-    except OSError:
-        db_size_mb = 0.0
+        rows = flux_query(
+            f'''
+            from(bucket: "{INFLUX_BUCKET}")
+              |> range(start: time(v: 0))
+              |> filter(fn: (r) => r._measurement == "energy_reading" and r._field == "power_w")
+              |> count()
+              |> group()
+              |> sum()
+            '''
+        )
+        total_readings = int(rows[0]["_value"]) if rows else 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Falha ao contar leituras no InfluxDB: %s", exc)
+        total_readings = 0
 
-    return render_template("index.html", devices=devices, db_size_mb=db_size_mb)
+    return render_template("index.html", devices=devices, total_readings=total_readings)
 
 
 @app.route("/api/ping", methods=["POST"])
@@ -138,71 +156,94 @@ def api_ping():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _latest_rows():
+    """Última leitura (todos os fields pivotados) de cada dispositivo."""
+    rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -30d)
+          |> filter(fn: (r) => r._measurement == "energy_reading")
+          |> filter(fn: (r) => r._field == "power_w" or r._field == "today_wh" or r._field == "month_wh" or r._field == "is_on")
+          |> toFloat()
+          |> group(columns: ["device", "_field"])
+          |> last()
+          |> group(columns: ["device"])
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+        '''
+    )
+    out = []
+    for r in rows:
+        out.append(
+            {
+                "device_name": r.get("device"),
+                "ts": int(r["_time"].timestamp()) if r.get("_time") else None,
+                "is_on": int(r.get("is_on") or 0),
+                "current_power_w": r.get("power_w"),
+                "today_energy_wh": r.get("today_wh"),
+                "month_energy_wh": r.get("month_wh"),
+            }
+        )
+    return out
+
+
 @app.route("/api/latest")
 @login_required
 def api_latest():
-    rows = query(
-        """
-        SELECT r.* FROM readings r
-        INNER JOIN (
-            SELECT device_name, MAX(ts) AS max_ts
-            FROM readings GROUP BY device_name
-        ) latest
-        ON r.device_name = latest.device_name AND r.ts = latest.max_ts
-        """
-    )
-    return jsonify(rows)
+    return jsonify(_latest_rows())
 
 
 @app.route("/api/history/<device_name>")
 @login_required
 def api_history(device_name):
-    since = int(time.time()) - 24 * 3600
-    rows = query(
-        """
-        SELECT ts, current_power_w, is_on
-        FROM readings
-        WHERE device_name = ? AND ts >= ?
-        ORDER BY ts ASC
-        """,
-        (device_name, since),
+    safe_name = device_name.replace('"', "")
+    rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -24h)
+          |> filter(fn: (r) => r._measurement == "energy_reading" and r.device == "{safe_name}")
+          |> filter(fn: (r) => r._field == "power_w" or r._field == "is_on")
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+          |> group()
+          |> sort(columns: ["_time"])
+        '''
     )
-    return jsonify(rows)
+    out = [
+        {
+            "ts": int(r["_time"].timestamp()),
+            "current_power_w": r.get("power_w"),
+            "is_on": int(r.get("is_on") or 0),
+        }
+        for r in rows
+        if r.get("_time")
+    ]
+    return jsonify(out)
 
 
 @app.route("/api/summary")
 @login_required
 def api_summary():
-    latest = query(
-        """
-        SELECT r.* FROM readings r
-        INNER JOIN (
-            SELECT device_name, MAX(ts) AS max_ts
-            FROM readings GROUP BY device_name
-        ) l ON r.device_name = l.device_name AND r.ts = l.max_ts
-        """
-    )
+    latest = _latest_rows()
     total_power = sum(r["current_power_w"] or 0 for r in latest)
     total_today_wh = sum(r["today_energy_wh"] or 0 for r in latest)
     total_month_wh = sum(r["month_energy_wh"] or 0 for r in latest)
     devices_on = sum(1 for r in latest if r["is_on"])
 
-    since = int(time.time()) - 24 * 3600
-    rows = query(
-        """
-        SELECT ts, device_name, current_power_w
-        FROM readings
-        WHERE ts >= ?
-        ORDER BY ts ASC
-        """,
-        (since,),
+    history_rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -24h)
+          |> filter(fn: (r) => r._measurement == "energy_reading" and r._field == "power_w")
+          |> aggregateWindow(every: {POLL_INTERVAL_SECONDS}s, fn: last, createEmpty: false)
+          |> group(columns: ["_time"])
+          |> sum()
+          |> sort(columns: ["_time"])
+        '''
     )
-    by_ts = {}
-    for r in rows:
-        bucket = r["ts"] - (r["ts"] % POLL_INTERVAL_SECONDS)
-        by_ts.setdefault(bucket, 0)
-        by_ts[bucket] += r["current_power_w"] or 0
-    history = [{"ts": ts, "total_power_w": p} for ts, p in sorted(by_ts.items())]
+    history = [
+        {"ts": int(r["_time"].timestamp()), "total_power_w": r.get("_value") or 0}
+        for r in history_rows
+        if r.get("_time")
+    ]
 
     return jsonify(
         {
@@ -220,16 +261,138 @@ def api_summary():
 @login_required
 def api_table():
     limit = int(os.environ.get("TABLE_ROWS", "25"))
-    rows = query(
-        """
-        SELECT device_name, ts, is_on, current_power_w, today_energy_wh
-        FROM readings
-        ORDER BY ts DESC
-        LIMIT ?
-        """,
-        (limit,),
+    rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -30d)
+          |> filter(fn: (r) => r._measurement == "energy_reading")
+          |> filter(fn: (r) => r._field == "power_w" or r._field == "today_wh" or r._field == "is_on")
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+          |> group()
+          |> sort(columns: ["_time"], desc: true)
+          |> limit(n: {limit})
+        '''
     )
-    return jsonify(rows)
+    out = [
+        {
+            "device_name": r.get("device"),
+            "ts": int(r["_time"].timestamp()),
+            "is_on": int(r.get("is_on") or 0),
+            "current_power_w": r.get("power_w"),
+            "today_energy_wh": r.get("today_wh"),
+        }
+        for r in rows
+        if r.get("_time")
+    ]
+    return jsonify(out)
+
+
+@app.route("/api/hourly-pattern")
+@login_required
+def api_hourly_pattern():
+    days = int(request.args.get("days", "365"))
+    rows = flux_query(
+        f'''
+        import "date"
+        import "timezone"
+        option location = timezone.location(name: "America/Sao_Paulo")
+
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -{days}d)
+          |> filter(fn: (r) => r._measurement == "house_reading" and r._field == "power_w")
+          |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+          |> map(fn: (r) => ({{ r with hour: date.hour(t: r._time) }}))
+          |> group(columns: ["hour"])
+          |> mean(column: "_value")
+          |> sort(columns: ["hour"])
+        '''
+    )
+    out = [{"hour": int(r.get("hour", 0)), "avg_power_w": round(r.get("_value") or 0, 1)} for r in rows]
+    return jsonify(out)
+
+
+def _house_energy_kwh_since(dt: datetime):
+    """Calcula energia consumida (kWh) desde o instante dt, integrando as
+    leituras de potência (W) ao longo do tempo — em vez de depender do
+    contador acumulado do próprio medidor (dps 111), que se mostrou
+    estático por horas mesmo com consumo real acontecendo, e portanto
+    não confiável pra esse cálculo. O Flux integral() faz a soma
+    trapezoidal de potência × tempo, convertida aqui de W·s pra kWh."""
+    ts = dt.isoformat()
+    rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: {ts})
+          |> filter(fn: (r) => r._measurement == "house_reading" and r._field == "power_w")
+          |> integral(unit: 1s)
+        '''
+    )
+    if not rows or rows[0].get("_value") is None:
+        return None
+    watt_seconds = rows[0]["_value"]
+    return watt_seconds / 3_600_000  # W·s -> kWh
+
+
+@app.route("/api/house-summary")
+@login_required
+def api_house_summary():
+    """Resumo do medidor de casa toda (Tuya/EKAZA), separado dos plugs
+    Tapo — não soma no total dos plugs, pra evitar contagem duplicada."""
+    house_cfg = load_house_meter_config()
+    if not house_cfg:
+        return jsonify({"enabled": False})
+
+    latest_rows = flux_query(
+        f'''
+        from(bucket: "{INFLUX_BUCKET}")
+          |> range(start: -30d)
+          |> filter(fn: (r) => r._measurement == "house_reading")
+          |> filter(fn: (r) => r._field == "power_w" or r._field == "voltage_v" or r._field == "current_a" or r._field == "total_energy_kwh")
+          |> toFloat()
+          |> group(columns: ["_field"])
+          |> last()
+          |> group()
+          |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+        '''
+    )
+    if not latest_rows:
+        return jsonify({"enabled": True, "has_data": False})
+
+    latest = latest_rows[0]
+
+    today_kwh = month_kwh = year_kwh = None
+    now = datetime.now().astimezone()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    year_start = now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    today_val = _house_energy_kwh_since(midnight)
+    month_val = _house_energy_kwh_since(month_start)
+    year_val = _house_energy_kwh_since(year_start)
+
+    today_kwh = max(0, round(today_val, 2)) if today_val is not None else None
+    month_kwh = max(0, round(month_val, 2)) if month_val is not None else None
+    year_kwh = max(0, round(year_val, 2)) if year_val is not None else None
+
+    plugs = _latest_rows()
+    monitored_power_w = sum(r["current_power_w"] or 0 for r in plugs)
+    house_power_w = latest.get("power_w") or 0
+    unidentified_power_w = max(0, round(house_power_w - monitored_power_w, 1))
+
+    return jsonify(
+        {
+            "enabled": True,
+            "has_data": True,
+            "power_w": house_power_w,
+            "voltage_v": latest.get("voltage_v"),
+            "current_a": latest.get("current_a"),
+            "monitored_power_w": round(monitored_power_w, 1),
+            "unidentified_power_w": unidentified_power_w,
+            "today_kwh": today_kwh,
+            "month_kwh": month_kwh,
+            "year_kwh": year_kwh,
+        }
+    )
 
 
 @app.route("/api/health")
